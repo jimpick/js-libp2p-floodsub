@@ -32,7 +32,7 @@ class FloodSub extends BaseProtocol {
      *
      * @type {TimeCache}
      */
-    this.cache = new TimeCache()
+    this.cache = new TimeCache({defaultTtl: 60 * 60 * 1000}) // One hour
 
     /**
      * List of our subscriptions
@@ -58,7 +58,10 @@ class FloodSub extends BaseProtocol {
       lp.decode(),
       pull.map((data) => pb.rpc.RPC.decode(data)),
       pull.drain(
-        (rpc) => this._onRpc(idB58Str, rpc),
+        (rpc) => {
+          // console.log('JimZ', idB58Str.slice(-3), conn)
+          return this._onRpc(idB58Str, rpc)
+        },
         (err) => this._onConnectionEnd(idB58Str, peer, err)
       )
     )
@@ -70,11 +73,13 @@ class FloodSub extends BaseProtocol {
     }
 
     this.log('rpc from', idB58Str)
+    const from = idB58Str.slice(-3)
+    // console.log('Jim floodsub from', from)
     const subs = rpc.subscriptions
     const msgs = rpc.msgs
 
     if (msgs && msgs.length) {
-      this._processRpcMessages(utils.normalizeInRpcMessages(rpc.msgs))
+      this._processRpcMessages(from, utils.normalizeInRpcMessages(rpc.msgs))
     }
 
     if (subs && subs.length) {
@@ -85,7 +90,7 @@ class FloodSub extends BaseProtocol {
     }
   }
 
-  _processRpcMessages (msgs) {
+  _processRpcMessages (from, msgs) {
     msgs.forEach((msg) => {
       const seqno = utils.msgId(msg.from, msg.seqno)
       // 1. check if I've seen the message, if yes, ignore
@@ -94,23 +99,32 @@ class FloodSub extends BaseProtocol {
       }
 
       this.cache.put(seqno)
+      console.log(`> ${from}:`, msg.from.slice(-3), msg.topicIDs.join(),
+        msg.seqno.slice(-4).toString('hex'))
 
       // 2. emit to self
-      this._emitMessages(msg.topicIDs, [msg])
+      // console.log('    - emit to self')
+      let cancelled = false
+      this._emitMessages(msg.topicIDs, [msg], () => { cancelled = true })
 
       // 3. propagate msg to others
-      this._forwardMessages(msg.topicIDs, [msg])
+      // console.log('    - forward')
+      if (!cancelled) {
+        this._forwardMessages(msg.topicIDs, [msg])
+      } else {
+        console.log('Jim cancelled')
+      }
     })
   }
 
-  _emitMessages (topics, messages) {
+  _emitMessages (topics, messages, cancel) {
     topics.forEach((topic) => {
       if (!this.subscriptions.has(topic)) {
         return
       }
 
       messages.forEach((message) => {
-        this.emit(topic, message)
+        this.emit(topic, message, cancel)
       })
     })
   }
@@ -175,10 +189,15 @@ class FloodSub extends BaseProtocol {
     const msgObjects = messages.map(buildMessage)
 
     // Emit to self if I'm interested
-    this._emitMessages(topics, msgObjects)
+    let cancelled = false
+    this._emitMessages(topics, msgObjects, () => { cancelled = true })
 
     // send to all the other peers
-    this._forwardMessages(topics, msgObjects)
+    if (!cancelled) {
+      this._forwardMessages(topics, msgObjects)
+    } else {
+      console.log('Jim cancelled')
+    }
   }
 
   /**
